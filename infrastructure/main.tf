@@ -10,13 +10,22 @@ locals {
     "POST /apis/{api_name}/force-clear" = "force_clear"
   }
 
+  # The GUI Lambda's own name + ARN — deterministic, no circular reference.
+  # ARN is constructed from known inputs (account ID via caller_identity).
+  gui_lambda_name = "${local.prefix}-gui-lambda"
+  gui_lambda_arn  = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${local.gui_lambda_name}"
+
   # Upstream Lambda / Authorizer values — injected by CI via -var flags (read from SSM by the workflow).
-  # Empty string when the upstream stack has not been deployed yet; resources deploy but env vars are blank.
-  lambda_arn               = var.existing_lambda_arn
-  lambda_function_name     = var.existing_lambda_function_name
+  # Falls back to the GUI Lambda itself when the upstream stack hasn't been deployed yet,
+  # so provisioners can create working API Gateways immediately.
+  lambda_arn               = var.existing_lambda_arn != "" ? var.existing_lambda_arn : local.gui_lambda_arn
+  lambda_function_name     = var.existing_lambda_function_name != "" ? var.existing_lambda_function_name : local.gui_lambda_name
   authorizer_arn           = var.existing_authorizer_arn
   authorizer_function_name = var.existing_authorizer_function_name
 }
+
+# ── Account ID (needed to construct the gui-lambda ARN without circular ref) ──
+data "aws_caller_identity" "current" {}
 
 # ── Read shared values written by api-portal-core (via SSM) ──────────────────
 data "aws_ssm_parameter" "cognito_pool_id" {
@@ -90,10 +99,12 @@ resource "aws_iam_role_policy" "gui_permissions" {
           "lambda:RemovePermission",
           "lambda:GetPolicy"
         ]
-        Resource = [
+        # local.lambda_arn always has a value (falls back to gui-lambda itself)
+        # authorizer_arn may be empty when no custom-key authorizer is deployed — wildcard covers that case
+        Resource = local.authorizer_arn != "" ? [
           "${local.lambda_arn}*",
           "${local.authorizer_arn}*",
-        ]
+        ] : ["${local.lambda_arn}*"]
       },
       {
         Sid    = "CloudWatchLogs"

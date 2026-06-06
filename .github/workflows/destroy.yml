@@ -1,0 +1,134 @@
+name: "Destroy Backend Service (DynamoDB · Lambda · API Gateway)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to destroy'
+        required: true
+        default: dev
+        type: choice
+        options: [dev, sit, stage, prod]
+      confirm:
+        description: 'Type the environment name again to confirm destruction'
+        required: true
+        default: ''
+
+env:
+  AWS_REGION:            eu-north-1
+  PROJECT_NAME:          api-portal
+  ENVIRONMENT:           ${{ github.event.inputs.environment }}
+  TF_VERSION:            '~1.7'
+  TF_BACKEND_BUCKET:     api-portal-terraform-state
+  TF_BACKEND_LOCK_TABLE: api-portal-terraform-locks
+
+jobs:
+  destroy:
+    name: "[${{ github.event.inputs.environment }}] DESTROY Backend — DynamoDB · Lambda · API Gateway"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # ── Safety gate ────────────────────────────────────────────────────────
+      - name: Confirm environment matches
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "${{ github.event.inputs.environment }}" ]; then
+            echo "❌ Confirmation mismatch!"
+            echo "   Input environment : ${{ github.event.inputs.environment }}"
+            echo "   Confirmation value: ${{ github.event.inputs.confirm }}"
+            echo ""
+            echo "   Re-run the workflow and type the environment name exactly in the 'confirm' field."
+            exit 1
+          fi
+          echo "✅ Confirmation matched — proceeding with destroy of '${{ github.event.inputs.environment }}'"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: api-portal-backend-destroy-${{ env.ENVIRONMENT }}
+          aws-region:        ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # ── Resolve upstream Lambda / Authorizer SSM params (needed for plan) ──
+      - name: Resolve upstream Lambda / Authorizer SSM params
+        id: ssm
+        run: |
+          set -euo pipefail
+          PREFIX="/api-portal/${{ env.ENVIRONMENT }}"
+
+          read_ssm() {
+            aws ssm get-parameter --name "$1" --query "Parameter.Value" --output text 2>/dev/null || echo ""
+          }
+
+          echo "lambda_arn=$(read_ssm "$PREFIX/lambda/arn")"                          >> "$GITHUB_OUTPUT"
+          echo "lambda_function_name=$(read_ssm "$PREFIX/lambda/function-name")"      >> "$GITHUB_OUTPUT"
+          echo "authorizer_arn=$(read_ssm "$PREFIX/authorizer/arn")"                  >> "$GITHUB_OUTPUT"
+          echo "authorizer_function_name=$(read_ssm "$PREFIX/authorizer/function-name")" >> "$GITHUB_OUTPUT"
+
+      # ── Package a minimal dummy zip so Terraform filebase64sha256() doesn't fail ──
+      - name: Create dummy Lambda zip (required for Terraform plan)
+        run: |
+          mkdir -p infrastructure
+          echo '{}' > /tmp/dummy.js
+          zip -j infrastructure/backend-lambda.zip /tmp/dummy.js
+          echo "✅ dummy zip created for Terraform plan"
+
+      - name: Terraform Init
+        working-directory: infrastructure
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ env.TF_BACKEND_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ env.TF_BACKEND_LOCK_TABLE }}" \
+            -backend-config="key=${{ env.PROJECT_NAME }}/backend/${{ env.ENVIRONMENT }}/terraform.tfstate"
+
+      - name: Terraform Validate
+        working-directory: infrastructure
+        run: terraform validate
+
+      - name: Terraform Plan (destroy)
+        working-directory: infrastructure
+        run: |
+          terraform plan \
+            -destroy \
+            -var-file="envs/${{ env.ENVIRONMENT }}.tfvars" \
+            -var="existing_lambda_arn=${{ steps.ssm.outputs.lambda_arn }}" \
+            -var="existing_lambda_function_name=${{ steps.ssm.outputs.lambda_function_name }}" \
+            -var="existing_authorizer_arn=${{ steps.ssm.outputs.authorizer_arn }}" \
+            -var="existing_authorizer_function_name=${{ steps.ssm.outputs.authorizer_function_name }}" \
+            -out=tfdestroyplan
+
+      - name: Terraform Destroy
+        working-directory: infrastructure
+        run: terraform apply -auto-approve tfdestroyplan
+
+      - name: Summary
+        run: |
+          echo ""
+          echo "══════════════════════════════════════════════"
+          echo "  🗑️  BACKEND DESTROYED  |  env=${{ env.ENVIRONMENT }}"
+          echo "══════════════════════════════════════════════"
+          echo "  Resources removed:"
+          echo "    • API Gateway (gui-api)"
+          echo "    • Lambda (gui-lambda)"
+          echo "    • DynamoDB (api-registry)"
+          echo "    • IAM role + policy"
+          echo "    • CloudWatch log group"
+          echo "    • SSM param (backend/api-url)"
+          echo "══════════════════════════════════════════════"
+          echo "  Terraform state key:"
+          echo "    ${{ env.PROJECT_NAME }}/backend/${{ env.ENVIRONMENT }}/terraform.tfstate"
+          echo "  Backend bucket preserved (shared across stacks):"
+          echo "    ${{ env.TF_BACKEND_BUCKET }}"
+          echo "══════════════════════════════════════════════"
+
