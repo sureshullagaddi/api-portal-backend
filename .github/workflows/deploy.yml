@@ -114,6 +114,35 @@ jobs:
             echo "✅ Lock table created"
           fi
 
+      - name: Resolve upstream Lambda / Authorizer SSM params
+        id: ssm
+        run: |
+          set -euo pipefail
+          PREFIX="/api-portal/${{ env.ENVIRONMENT }}"
+
+          read_ssm() {
+            aws ssm get-parameter --name "$1" --query "Parameter.Value" --output text 2>/dev/null || echo ""
+          }
+
+          LAMBDA_ARN=$(read_ssm "$PREFIX/lambda/arn")
+          LAMBDA_FN=$(read_ssm  "$PREFIX/lambda/function-name")
+          AUTH_ARN=$(read_ssm   "$PREFIX/authorizer/arn")
+          AUTH_FN=$(read_ssm    "$PREFIX/authorizer/function-name")
+
+          echo "lambda_arn=$LAMBDA_ARN"               >> "$GITHUB_OUTPUT"
+          echo "lambda_function_name=$LAMBDA_FN"      >> "$GITHUB_OUTPUT"
+          echo "authorizer_arn=$AUTH_ARN"             >> "$GITHUB_OUTPUT"
+          echo "authorizer_function_name=$AUTH_FN"    >> "$GITHUB_OUTPUT"
+
+          if [ -z "$LAMBDA_ARN" ] || [ -z "$AUTH_ARN" ]; then
+            echo "⚠️  WARNING: upstream Lambda/Authorizer SSM params not found."
+            echo "   Deploy will proceed but EXISTING_LAMBDA_ARN / EXISTING_AUTHORIZER_LAMBDA_ARN"
+            echo "   env vars on the GUI Lambda will be empty until the upstream stack is deployed."
+          else
+            echo "✅ Upstream Lambda ARN:      $LAMBDA_ARN"
+            echo "✅ Upstream Authorizer ARN:  $AUTH_ARN"
+          fi
+
       - name: Terraform Init
         working-directory: infrastructure
         run: |
@@ -132,6 +161,10 @@ jobs:
         run: |
           terraform plan \
             -var-file="envs/${{ env.ENVIRONMENT }}.tfvars" \
+            -var="existing_lambda_arn=${{ steps.ssm.outputs.lambda_arn }}" \
+            -var="existing_lambda_function_name=${{ steps.ssm.outputs.lambda_function_name }}" \
+            -var="existing_authorizer_arn=${{ steps.ssm.outputs.authorizer_arn }}" \
+            -var="existing_authorizer_function_name=${{ steps.ssm.outputs.authorizer_function_name }}" \
             -out=tfplan
 
       - name: Terraform Apply

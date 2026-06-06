@@ -37,3 +37,33 @@ variable "lambda_timeout_seconds" {
   type        = number
   default     = 60
 }
+
+# ── Upstream Lambda / Authorizer overrides ────────────────────────────────────
+# These are read from SSM by default (published by the upstream lambda stack).
+# Set them here to skip the SSM lookup (useful when that stack isn't deployed yet
+# or when you want to pin specific values per environment).
+
+variable "existing_lambda_arn" {
+  description = "ARN of the existing (upstream) Lambda. Leave empty to read from SSM /lambda/arn."
+  type        = string
+  default     = ""
+}
+
+variable "existing_lambda_function_name" {
+  description = "Function name of the existing Lambda. Leave empty to read from SSM /lambda/function-name."
+  type        = string
+  default     = ""
+}
+
+variable "existing_authorizer_arn" {
+  description = "ARN of the Lambda authorizer. Leave empty to read from SSM /authorizer/arn."
+  type        = string
+  default     = ""
+}
+
+variable "existing_authorizer_function_name" {
+  description = "Function name of the Lambda authorizer. Leave empty to read from SSM /authorizer/function-name."
+  type        = string
+  default     = ""
+}
+

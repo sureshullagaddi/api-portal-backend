@@ -9,6 +9,28 @@ locals {
     "DELETE /apis/{api_name}"           = "destroy"
     "POST /apis/{api_name}/force-clear" = "force_clear"
   }
+
+  # Resolve upstream Lambda / Authorizer: variable override → SSM lookup
+  lambda_arn                = var.existing_lambda_arn != "" ? var.existing_lambda_arn : (
+                                length(data.aws_ssm_parameter.lambda_arn) > 0
+                                ? data.aws_ssm_parameter.lambda_arn[0].value
+                                : ""
+                              )
+  lambda_function_name      = var.existing_lambda_function_name != "" ? var.existing_lambda_function_name : (
+                                length(data.aws_ssm_parameter.lambda_function_name) > 0
+                                ? data.aws_ssm_parameter.lambda_function_name[0].value
+                                : ""
+                              )
+  authorizer_arn            = var.existing_authorizer_arn != "" ? var.existing_authorizer_arn : (
+                                length(data.aws_ssm_parameter.authorizer_arn) > 0
+                                ? data.aws_ssm_parameter.authorizer_arn[0].value
+                                : ""
+                              )
+  authorizer_function_name  = var.existing_authorizer_function_name != "" ? var.existing_authorizer_function_name : (
+                                length(data.aws_ssm_parameter.authorizer_function_name) > 0
+                                ? data.aws_ssm_parameter.authorizer_function_name[0].value
+                                : ""
+                              )
 }
 
 # ── Read shared values written by api-portal-core (via SSM) ──────────────────
@@ -20,20 +42,25 @@ data "aws_ssm_parameter" "cognito_client_id" {
   name = "/${var.project_name}/${var.environment}/cognito/client-id"
 }
 
+# Conditional SSM lookups — skipped when override variables are provided
 data "aws_ssm_parameter" "lambda_arn" {
-  name = "/${var.project_name}/${var.environment}/lambda/arn"
+  count = var.existing_lambda_arn == "" ? 1 : 0
+  name  = "/${var.project_name}/${var.environment}/lambda/arn"
 }
 
 data "aws_ssm_parameter" "lambda_function_name" {
-  name = "/${var.project_name}/${var.environment}/lambda/function-name"
+  count = var.existing_lambda_function_name == "" ? 1 : 0
+  name  = "/${var.project_name}/${var.environment}/lambda/function-name"
 }
 
 data "aws_ssm_parameter" "authorizer_arn" {
-  name = "/${var.project_name}/${var.environment}/authorizer/arn"
+  count = var.existing_authorizer_arn == "" ? 1 : 0
+  name  = "/${var.project_name}/${var.environment}/authorizer/arn"
 }
 
 data "aws_ssm_parameter" "authorizer_function_name" {
-  name = "/${var.project_name}/${var.environment}/authorizer/function-name"
+  count = var.existing_authorizer_function_name == "" ? 1 : 0
+  name  = "/${var.project_name}/${var.environment}/authorizer/function-name"
 }
 
 # ── DynamoDB — API registry ───────────────────────────────────────────────────
@@ -99,8 +126,8 @@ resource "aws_iam_role_policy" "gui_permissions" {
           "lambda:GetPolicy"
         ]
         Resource = [
-          "${data.aws_ssm_parameter.lambda_arn.value}*",
-          "${data.aws_ssm_parameter.authorizer_arn.value}*",
+          "${local.lambda_arn}*",
+          "${local.authorizer_arn}*",
         ]
       },
       {
@@ -155,12 +182,12 @@ resource "aws_lambda_function" "gui" {
     variables = {
       DYNAMODB_TABLE                    = aws_dynamodb_table.api_registry.name
       AWS_ACCOUNT_REGION                = var.aws_region
-      EXISTING_LAMBDA_ARN               = data.aws_ssm_parameter.lambda_arn.value
-      EXISTING_LAMBDA_FUNCTION_NAME     = data.aws_ssm_parameter.lambda_function_name.value
+      EXISTING_LAMBDA_ARN               = local.lambda_arn
+      EXISTING_LAMBDA_FUNCTION_NAME     = local.lambda_function_name
       EXISTING_COGNITO_POOL_ID          = data.aws_ssm_parameter.cognito_pool_id.value
       EXISTING_COGNITO_CLIENT_ID        = data.aws_ssm_parameter.cognito_client_id.value
-      EXISTING_AUTHORIZER_LAMBDA_ARN    = data.aws_ssm_parameter.authorizer_arn.value
-      EXISTING_AUTHORIZER_FUNCTION_NAME = data.aws_ssm_parameter.authorizer_function_name.value
+      EXISTING_AUTHORIZER_LAMBDA_ARN    = local.authorizer_arn
+      EXISTING_AUTHORIZER_FUNCTION_NAME = local.authorizer_function_name
       CORS_ALLOWED_ORIGIN               = var.cors_allowed_origin
     }
   }
