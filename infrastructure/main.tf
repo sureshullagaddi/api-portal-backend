@@ -10,22 +10,18 @@ locals {
     "POST /apis/{api_name}/force-clear" = "force_clear"
   }
 
-  # The GUI Lambda's own name + ARN — deterministic, no circular reference.
-  # ARN is constructed from known inputs (account ID via caller_identity).
+  # The GUI Lambda's own name — used only for the portal management API.
   gui_lambda_name = "${local.prefix}-gui-lambda"
-  gui_lambda_arn  = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${local.gui_lambda_name}"
 
-  # Upstream Lambda / Authorizer values — injected by CI via -var flags (read from SSM by the workflow).
-  # Falls back to the GUI Lambda itself when the upstream stack hasn't been deployed yet,
-  # so provisioners can create working API Gateways immediately.
-  lambda_arn               = var.existing_lambda_arn != "" ? var.existing_lambda_arn : local.gui_lambda_arn
-  lambda_function_name     = var.existing_lambda_function_name != "" ? var.existing_lambda_function_name : local.gui_lambda_name
+
+  # Resolve Lambda / Authorizer — use override var if set, otherwise use the
+  # backend Lambda deployed by this stack (permanent, no SSM fallback needed).
+  lambda_arn               = var.existing_lambda_arn != "" ? var.existing_lambda_arn : aws_lambda_function.backend.arn
+  lambda_function_name     = var.existing_lambda_function_name != "" ? var.existing_lambda_function_name : aws_lambda_function.backend.function_name
   authorizer_arn           = var.existing_authorizer_arn
   authorizer_function_name = var.existing_authorizer_function_name
 }
 
-# ── Account ID (needed to construct the gui-lambda ARN without circular ref) ──
-data "aws_caller_identity" "current" {}
 
 # ── Read shared values written by api-portal-core (via SSM) ──────────────────
 data "aws_ssm_parameter" "cognito_pool_id" {
@@ -49,6 +45,51 @@ resource "aws_dynamodb_table" "api_registry" {
   }
 
   point_in_time_recovery { enabled = true }
+}
+
+# ── IAM — Backend Lambda ──────────────────────────────────────────────────────
+resource "aws_iam_role" "backend_lambda" {
+  name = "${local.prefix}-backend-lambda-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "backend_basic" {
+  role       = aws_iam_role.backend_lambda.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# ── CloudWatch log group — Backend Lambda ─────────────────────────────────────
+resource "aws_cloudwatch_log_group" "backend_lambda" {
+  name              = "/aws/lambda/${local.prefix}-backend-lambda"
+  retention_in_days = var.log_retention_days
+}
+
+# ── Backend Lambda — shared integration target for all provisioned API GWs ────
+resource "aws_lambda_function" "backend" {
+  function_name    = "${local.prefix}-backend-lambda"
+  role             = aws_iam_role.backend_lambda.arn
+  runtime          = "nodejs18.x"
+  handler          = "backend-handler.handler"
+  filename         = local.lambda_zip
+  source_code_hash = filebase64sha256(local.lambda_zip)
+  architectures    = ["arm64"]
+  timeout          = var.lambda_timeout_seconds
+
+  environment {
+    variables = {
+      ENVIRONMENT = var.environment
+      AWS_REGION  = var.aws_region
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.backend_lambda]
 }
 
 # ── IAM — GUI Lambda ──────────────────────────────────────────────────────────

@@ -258,6 +258,30 @@ exports.handler = async (event) => {
       return ok({ message: `API '${apiName}' and all its AWS resources have been deleted` });
     }
 
+    // ── Mock backend catch-all (DEV ONLY) ────────────────────────────────────
+    // Only active when EXISTING_LAMBDA_ARN falls back to this gui-lambda itself.
+    // Remove this block once a real backend Lambda is deployed and its ARN is
+    // published to SSM at /api-portal/{env}/lambda/arn.
+    if (!path?.startsWith('/apis')) {
+      console.log(`[handler] mock-backend hit: ${method} ${path}`);
+      return ok({
+        message:     '✅ API Portal — mock backend response (dev fallback)',
+        note:        'Deploy a real backend Lambda and publish its ARN to SSM at /api-portal/dev/lambda/arn, then re-run the backend deploy workflow to remove this fallback.',
+        request: {
+          method,
+          path,
+          queryStringParameters: event.queryStringParameters ?? null,
+          headers: {
+            'user-agent':   event.headers?.['user-agent']    ?? null,
+            'content-type': event.headers?.['content-type']  ?? null,
+          },
+          body: event.body ? (() => { try { return JSON.parse(event.body); } catch { return event.body; } })() : null,
+        },
+        environment: process.env.ENVIRONMENT ?? 'unknown',
+        timestamp:   new Date().toISOString(),
+      });
+    }
+
     return err('Route not found', 404);
 
   } catch (e) {
@@ -265,4 +289,5 @@ exports.handler = async (event) => {
     return err('Internal server error', 500, await serializeAwsError(e));
   }
 };
+
 

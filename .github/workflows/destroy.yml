@@ -80,7 +80,8 @@ jobs:
         run: |
           mkdir -p infrastructure
           echo '{}' > /tmp/dummy.js
-          zip -j infrastructure/backend-lambda.zip /tmp/dummy.js
+          cp /tmp/dummy.js /tmp/dummy-backend.js
+          zip -j infrastructure/backend-lambda.zip /tmp/dummy.js /tmp/dummy-backend.js
           echo "✅ dummy zip created for Terraform plan"
 
       - name: Terraform Init

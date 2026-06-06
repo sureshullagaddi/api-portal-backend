@@ -62,7 +62,7 @@ jobs:
       - name: Package backend Lambda zip
         run: |
           zip -r infrastructure/backend-lambda.zip \
-            handler.js db.js provisioners/ node_modules/ package.json \
+            handler.js backend-handler.js db.js provisioners/ node_modules/ package.json \
             --exclude "*.DS_Store" --exclude "*.test.js" --exclude "*.zip"
           echo "✅ backend-lambda.zip: $(du -sh infrastructure/backend-lambda.zip | cut -f1)"
 
