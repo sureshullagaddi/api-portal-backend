@@ -10,27 +10,12 @@ locals {
     "POST /apis/{api_name}/force-clear" = "force_clear"
   }
 
-  # Resolve upstream Lambda / Authorizer: variable override → SSM lookup
-  lambda_arn                = var.existing_lambda_arn != "" ? var.existing_lambda_arn : (
-                                length(data.aws_ssm_parameter.lambda_arn) > 0
-                                ? data.aws_ssm_parameter.lambda_arn[0].value
-                                : ""
-                              )
-  lambda_function_name      = var.existing_lambda_function_name != "" ? var.existing_lambda_function_name : (
-                                length(data.aws_ssm_parameter.lambda_function_name) > 0
-                                ? data.aws_ssm_parameter.lambda_function_name[0].value
-                                : ""
-                              )
-  authorizer_arn            = var.existing_authorizer_arn != "" ? var.existing_authorizer_arn : (
-                                length(data.aws_ssm_parameter.authorizer_arn) > 0
-                                ? data.aws_ssm_parameter.authorizer_arn[0].value
-                                : ""
-                              )
-  authorizer_function_name  = var.existing_authorizer_function_name != "" ? var.existing_authorizer_function_name : (
-                                length(data.aws_ssm_parameter.authorizer_function_name) > 0
-                                ? data.aws_ssm_parameter.authorizer_function_name[0].value
-                                : ""
-                              )
+  # Upstream Lambda / Authorizer values — injected by CI via -var flags (read from SSM by the workflow).
+  # Empty string when the upstream stack has not been deployed yet; resources deploy but env vars are blank.
+  lambda_arn               = var.existing_lambda_arn
+  lambda_function_name     = var.existing_lambda_function_name
+  authorizer_arn           = var.existing_authorizer_arn
+  authorizer_function_name = var.existing_authorizer_function_name
 }
 
 # ── Read shared values written by api-portal-core (via SSM) ──────────────────
@@ -42,26 +27,6 @@ data "aws_ssm_parameter" "cognito_client_id" {
   name = "/${var.project_name}/${var.environment}/cognito/client-id"
 }
 
-# Conditional SSM lookups — skipped when override variables are provided
-data "aws_ssm_parameter" "lambda_arn" {
-  count = var.existing_lambda_arn == "" ? 1 : 0
-  name  = "/${var.project_name}/${var.environment}/lambda/arn"
-}
-
-data "aws_ssm_parameter" "lambda_function_name" {
-  count = var.existing_lambda_function_name == "" ? 1 : 0
-  name  = "/${var.project_name}/${var.environment}/lambda/function-name"
-}
-
-data "aws_ssm_parameter" "authorizer_arn" {
-  count = var.existing_authorizer_arn == "" ? 1 : 0
-  name  = "/${var.project_name}/${var.environment}/authorizer/arn"
-}
-
-data "aws_ssm_parameter" "authorizer_function_name" {
-  count = var.existing_authorizer_function_name == "" ? 1 : 0
-  name  = "/${var.project_name}/${var.environment}/authorizer/function-name"
-}
 
 # ── DynamoDB — API registry ───────────────────────────────────────────────────
 resource "aws_dynamodb_table" "api_registry" {
