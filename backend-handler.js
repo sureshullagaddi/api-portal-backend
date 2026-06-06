@@ -4,11 +4,16 @@
  * backend-handler.js — Shared backend Lambda
  *
  * This is the Lambda that ALL provisioned API Gateways integrate with.
- * Every API created via the portal routes its traffic here.
+ * Every API created via the portal routes its traffic here, regardless
+ * of what route path or HTTP method was configured.
  *
- * Extend this file to add real business logic per route/api_name.
- * The api_name is available via the custom header X-Api-Name (set by
- * provisioners) or can be inferred from the domain / path context.
+ * Built-in routes:
+ *   ANY /health  → health check response
+ *   ANY /echo    → mirrors back the full request
+ *   ANY *        → dynamic catch-all: returns 200 with request details
+ *
+ * To add real business logic, add explicit route handlers before the
+ * catch-all block at the bottom of this file.
  */
 
 const CORS = {
@@ -20,14 +25,6 @@ const CORS = {
 
 function ok(body, status = 200) {
   return { statusCode: status, headers: CORS, body: JSON.stringify(body, null, 2) };
-}
-
-function notFound(path) {
-  return {
-    statusCode: 404,
-    headers: CORS,
-    body: JSON.stringify({ error: 'Not found', path }),
-  };
 }
 
 exports.handler = async (event) => {
@@ -42,29 +39,23 @@ exports.handler = async (event) => {
     return { statusCode: 204, headers: CORS, body: '' };
   }
 
-  // ── Health / smoke-test ─────────────────────────────────────────────────────
+  // ── Health check ────────────────────────────────────────────────────────────
   if (path === '/health' || path?.endsWith('/health')) {
     return ok({
       status:      'healthy',
       service:     'api-portal-backend-lambda',
       environment: process.env.ENVIRONMENT,
-      region:      process.env.AWS_REGION,   // set automatically by Lambda runtime
+      region:      process.env.AWS_REGION,
       timestamp:   new Date().toISOString(),
     });
   }
 
-  // ── Echo endpoint — useful for integration testing ──────────────────────────
+  // ── Echo endpoint ───────────────────────────────────────────────────────────
   if (path === '/echo' || path?.endsWith('/echo')) {
     let body = null;
     try { body = event.body ? JSON.parse(event.body) : null; } catch { body = event.body; }
     return ok({
-      echo: {
-        method,
-        path,
-        query,
-        headers: event.headers,
-        body,
-      },
+      echo: { method, path, query, headers: event.headers, body },
       timestamp: new Date().toISOString(),
     });
   }
@@ -73,16 +64,29 @@ exports.handler = async (event) => {
   //
   // Example:
   //   if (method === 'GET' && path === '/data') {
-  //     const data = await fetchFromDB();
-  //     return ok({ data });
+  //     return ok({ data: await fetchFromDB() });
   //   }
   //
-  // The provisioned API name is available via:
-  //   event.headers?.['x-api-portal-name']  (set by the portal when provisioning)
-  //   or derive it from path segments
   // ────────────────────────────────────────────────────────────────────────────
 
-  console.warn(`[backend] unhandled route: ${method} ${path}`);
-  return notFound(path);
+  // ── Dynamic catch-all — returns 200 for any provisioned route ───────────────
+  // The API Portal can provision any path/method combination. This catch-all
+  // ensures every provisioned API returns a valid 200 response out of the box.
+  let parsedBody = null;
+  try { parsedBody = event.body ? JSON.parse(event.body) : null; } catch { parsedBody = event.body; }
+
+  console.log(`[backend] catch-all: ${method} ${path}`);
+  return ok({
+    message:   `✅ API Portal — ${method} ${path}`,
+    service:   'api-portal-backend-lambda',
+    request: {
+      method,
+      path,
+      query:   Object.keys(query).length ? query : null,
+      body:    parsedBody,
+    },
+    environment: process.env.ENVIRONMENT,
+    timestamp:   new Date().toISOString(),
+  });
 };
 
