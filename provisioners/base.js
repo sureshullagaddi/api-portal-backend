@@ -6,6 +6,7 @@ const {
   CreateIntegrationCommand,
   CreateRouteCommand,
   CreateStageCommand,
+  UpdateStageCommand,
   CreateDeploymentCommand,
   CreateAuthorizerCommand,
   DeleteApiCommand,
@@ -160,7 +161,9 @@ async function createHttpApiBase(apiName, environment, description, { onApiCreat
  */
 async function enableAutoDeployAndDeploy(apiId, logTag) {
   console.log(`${logTag} enableAutoDeployAndDeploy — updating stage + deploying`);
-  await apigw.send(new CreateStageCommand({ ApiId: apiId, StageName: '$default', AutoDeploy: true }));
+  // Stage was created with AutoDeploy=false in createHttpApiBase — update it here
+  // after all routes/authorizers are in place, avoiding the auto-deploy lock.
+  await apigw.send(new UpdateStageCommand({ ApiId: apiId, StageName: '$default', AutoDeploy: true }));
   const deployment = await apigw.send(new CreateDeploymentCommand({ ApiId: apiId, StageName: '$default' }));
   console.log(`${logTag} enableAutoDeployAndDeploy done — deploymentId=${deployment.DeploymentId}`);
 }
