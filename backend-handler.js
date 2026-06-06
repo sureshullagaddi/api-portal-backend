@@ -45,10 +45,11 @@ exports.handler = async (event) => {
   // ── Health / smoke-test ─────────────────────────────────────────────────────
   if (path === '/health' || path?.endsWith('/health')) {
     return ok({
-      status:    'healthy',
-      service:   'api-portal-backend-lambda',
-      timestamp: new Date().toISOString(),
-      region:    process.env.AWS_REGION,
+      status:      'healthy',
+      service:     'api-portal-backend-lambda',
+      environment: process.env.ENVIRONMENT,
+      region:      process.env.AWS_REGION,   // set automatically by Lambda runtime
+      timestamp:   new Date().toISOString(),
     });
   }
 

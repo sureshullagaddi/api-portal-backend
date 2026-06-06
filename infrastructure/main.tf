@@ -85,7 +85,6 @@ resource "aws_lambda_function" "backend" {
   environment {
     variables = {
       ENVIRONMENT = var.environment
-      AWS_REGION  = var.aws_region
     }
   }
 
