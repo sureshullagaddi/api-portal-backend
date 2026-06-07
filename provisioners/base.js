@@ -104,11 +104,14 @@ async function getAccountId() {
 
 /**
  * Creates the base HTTP API (v2) + Lambda integration.
- * Stage is created with AutoDeploy=FALSE intentionally — calling
- * enableAutoDeployAndDeploy() after routes/authorizers avoids the
- * AWS internal auto-deploy lock that causes CreateAuthorizer → 400.
+ * @param {Object} opts
+ * @param {boolean} [opts.skipStage=false] - Skip $default stage creation.
+ *   Pass true for http-jwt so the JWT authorizer can be created before the
+ *   stage (creating the stage first causes an internal AWS lock that returns
+ *   400 on CreateAuthorizer). The caller is then responsible for creating
+ *   the stage after the authorizer.
  */
-async function createHttpApiBase(apiName, environment, description, { onApiCreated } = {}) {
+async function createHttpApiBase(apiName, environment, description, { onApiCreated, skipStage = false } = {}) {
   let _apiId = null;
   const tag = () => `[base|${apiName}-${environment}|apiId=${_apiId ?? 'pending'}]`;
 
@@ -131,10 +134,15 @@ async function createHttpApiBase(apiName, environment, description, { onApiCreat
   console.log(`${tag()} step 2 done — integrationId=${integration.IntegrationId}`);
 
   // 3. Stage — AutoDeploy: FALSE (avoids deployment lock during authorizer creation)
-  await apigw.send(new CreateStageCommand({
-    ApiId: api.ApiId, StageName: '$default', AutoDeploy: false,
-  }));
-  console.log(`${tag()} step 3 done — stage created (AutoDeploy=false, deploy triggered after routes)`);
+  // Skipped when skipStage=true (e.g. http-jwt creates authorizer first to avoid the lock)
+  if (!skipStage) {
+    await apigw.send(new CreateStageCommand({
+      ApiId: api.ApiId, StageName: '$default', AutoDeploy: false,
+    }));
+    console.log(`${tag()} step 3 done — stage created (AutoDeploy=false)`);
+  } else {
+    console.log(`${tag()} step 3 skipped — stage will be created after authorizer`);
+  }
 
   // 4. CloudWatch log group
   const logGroupName = `/aws/apigateway/${apiName}-${environment}-api`;
