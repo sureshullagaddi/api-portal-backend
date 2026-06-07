@@ -1,9 +1,83 @@
 'use strict';
 
 const https = require('https');
-const { createHttpApiBase, deleteHttpApiBase, apigw, CreateRouteCommand, CreateAuthorizerCommand, enableAutoDeployAndDeploy } = require('./base');
+const { createHttpApiBase, deleteHttpApiBase, apigw, CreateRouteCommand, enableAutoDeployAndDeploy } = require('./base');
 
 const REGION = process.env.AWS_ACCOUNT_REGION || process.env.AWS_REGION;
+
+// ── Raw SigV4-signed HTTPS call for CreateAuthorizer ─────────────────────────
+// Bypasses the SDK — CLI test confirmed the raw API call works fine with these
+// exact params. SDK 3.x swallows the 400 response body masking the real error.
+async function createJwtAuthorizerRaw({ apiId, name, issuer, audience, identitySource, logTag }) {
+  const { SignatureV4 } = require('@smithy/signature-v4');
+  const { Hash }        = require('@smithy/hash-node');
+
+  // Resolve credentials (config.credentials is a provider function, must be called)
+  const creds    = await apigw.config.credentials();
+  const hostname = `apigateway.${REGION}.amazonaws.com`;
+  const path     = `/v2/apis/${apiId}/authorizers`;
+
+  const bodyStr = JSON.stringify({
+    authorizerType:   'JWT',
+    identitySource,
+    jwtConfiguration: { audience, issuer },
+    name,
+  });
+
+  const signer = new SignatureV4({
+    credentials: creds,          // pass resolved object, not the provider function
+    region:      REGION,
+    service:     'apigateway',
+    sha256:      Hash.bind(null, 'sha256'),
+  });
+
+  // Build headers — always include x-amz-security-token for Lambda's temp credentials
+  const inputHeaders = {
+    host:             hostname,
+    'content-type':   'application/json',
+    'content-length': String(Buffer.byteLength(bodyStr)),
+  };
+  if (creds.sessionToken) {
+    inputHeaders['x-amz-security-token'] = creds.sessionToken;
+  }
+  console.log(`${logTag} raw CreateAuthorizer — sessionToken present: ${!!creds.sessionToken}`);
+
+  const signed = await signer.sign({
+    method:   'POST',
+    protocol: 'https:',
+    hostname,
+    path,
+    headers:  inputHeaders,
+    body:     bodyStr,
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({ hostname, path, method: 'POST', headers: signed.headers }, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        console.log(`${logTag} raw CreateAuthorizer → HTTP ${res.statusCode} | body: ${data || '(empty)'}`);
+        if (res.statusCode === 201) {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error(`Created (201) but failed to parse response: ${data}`)); }
+        } else {
+          let parsed = null;
+          try { parsed = JSON.parse(data); } catch { /* not JSON */ }
+          const msg = parsed?.message || parsed?.Message || data || `HTTP ${res.statusCode}`;
+          reject(Object.assign(new Error(msg), {
+            name:       String(res.statusCode),
+            httpStatus: res.statusCode,
+            bodyRaw:    data,
+            bodyJson:   parsed,
+          }));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
 
 function validateCognitoIssuer(issuer, poolId, logTag) {
   const discoveryUrl = `${issuer}/.well-known/openid-configuration`;
@@ -16,25 +90,14 @@ function validateCognitoIssuer(issuer, poolId, logTag) {
         console.log(`${logTag} pre-flight: pool valid (HTTP 200)`);
         resolve();
       } else {
-        const e = new Error(
+        reject(Object.assign(new Error(
           `Cognito pool not found — OIDC endpoint returned HTTP ${res.statusCode}. ` +
-          `Pool ID '${poolId}' in region '${REGION}'. URL: ${discoveryUrl}`
-        );
-        e.name = 'CognitoPoolNotFound';
-        reject(e);
+          `Pool ID '${poolId}' in region '${REGION}'.`
+        ), { name: 'CognitoPoolNotFound' }));
       }
     });
-    req.on('timeout', () => {
-      req.destroy();
-      const e = new Error(`Cognito OIDC endpoint timed out (6s). Pool: '${poolId}' URL: ${discoveryUrl}`);
-      e.name = 'CognitoPoolTimeout';
-      reject(e);
-    });
-    req.on('error', (err) => {
-      const e = new Error(`Cognito OIDC endpoint unreachable: ${err.message}. Pool: '${poolId}'`);
-      e.name = 'CognitoPoolUnreachable';
-      reject(e);
-    });
+    req.on('timeout', () => { req.destroy(); reject(Object.assign(new Error(`Cognito OIDC timed out. Pool: '${poolId}'`), { name: 'CognitoPoolTimeout' })); });
+    req.on('error',   (err) => reject(Object.assign(new Error(`Cognito OIDC unreachable: ${err.message}`), { name: 'CognitoPoolUnreachable' })));
   });
 }
 
@@ -48,85 +111,51 @@ async function create({ apiName, environment, routePath, httpMethod, onApiCreate
 
   console.log(`${tag()} create start | region=${REGION}`);
   console.log(`${tag()} env vars | COGNITO_POOL_ID=${poolId} CLIENT_ID=${clientId}`);
-  console.log(`${tag()} jwt config | issuer=${issuer} audience=["${clientId}"]`);
 
-  if (!poolId || poolId === 'undefined') throw Object.assign(
-    new Error(`EXISTING_COGNITO_POOL_ID not set (got: '${poolId}')`), { name: 'MissingCognitoPoolId' }
-  );
-  if (!clientId || clientId === 'undefined') throw Object.assign(
-    new Error(`EXISTING_COGNITO_CLIENT_ID not set (got: '${clientId}')`), { name: 'MissingCognitoClientId' }
-  );
+  if (!poolId || poolId === 'undefined') throw Object.assign(new Error(`EXISTING_COGNITO_POOL_ID not set`), { name: 'MissingCognitoPoolId' });
+  if (!clientId || clientId === 'undefined') throw Object.assign(new Error(`EXISTING_COGNITO_CLIENT_ID not set`), { name: 'MissingCognitoClientId' });
 
-  // Pre-flight: verify Cognito pool exists BEFORE creating any AWS resources
   await validateCognitoIssuer(issuer, poolId, tag());
 
   const base = await createHttpApiBase(apiName, environment,
     `JWT-protected HTTP API — Cognito auth, ${httpMethod} ${routePath}`, { onApiCreated });
   _apiId = base.apiId;
-  console.log(`${tag()} base created | endpoint=${base.apiEndpoint}`);
 
   const safeAudience = [clientId].filter(Boolean);
-  if (safeAudience.length === 0) throw Object.assign(
-    new Error(`JWT audience is empty — EXISTING_COGNITO_CLIENT_ID='${clientId}'`), { name: 'EmptyJwtAudience' }
-  );
 
-  // Step 6 — Create JWT authorizer (stage AutoDeploy is OFF — no deployment lock)
-  // Retried up to 3 times with backoff — API GW occasionally returns 400 on the
-  // first attempt due to internal propagation delay after CreateApi.
-  const authorizerInput = {
-    ApiId:            base.apiId,
-    Name:             `${apiName}-${environment}-jwt-authorizer`,
-    AuthorizerType:   'JWT',
-    IdentitySource:   '$request.header.Authorization',
-    JwtConfiguration: { Issuer: issuer, Audience: safeAudience },
-  };
-  console.log(`${tag()} step 6 — CreateAuthorizer input:`, JSON.stringify(authorizerInput));
+  // Step 6 — Create JWT authorizer via raw signed HTTPS (same call the CLI makes successfully)
+  console.log(`${tag()} step 6 — CreateAuthorizer (raw HTTPS) issuer=${issuer}`);
+  const authorizerResult = await createJwtAuthorizerRaw({
+    apiId:          base.apiId,
+    name:           `${apiName}-${environment}-jwt-authorizer`,
+    issuer,
+    audience:       safeAudience,
+    identitySource: '$request.header.Authorization',
+    logTag:         tag(),
+  });
+  const authorizerId = authorizerResult.authorizerId;
+  console.log(`${tag()} step 6 done | authorizerId=${authorizerId}`);
 
-  let authorizer;
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      if (attempt > 1) {
-        const delay = attempt * 2000;
-        console.log(`${tag()} step 6 — retry attempt ${attempt}/${maxAttempts}, waiting ${delay}ms...`);
-        await new Promise(r => setTimeout(r, delay));
-      }
-      authorizer = await apigw.send(new CreateAuthorizerCommand(authorizerInput));
-      console.log(`${tag()} step 6 done | authorizerId=${authorizer.AuthorizerId} (attempt ${attempt})`);
-      break;
-    } catch (e) {
-      const isRetryable = e.$metadata?.httpStatusCode === 400 || e.$metadata?.httpStatusCode === 429;
-      console.error(`${tag()} step 6 attempt ${attempt}/${maxAttempts} FAILED:`, {
-        name:       e.name,
-        message:    e.message,
-        httpStatus: e.$metadata?.httpStatusCode,
-        requestId:  e.$metadata?.requestId,
-        bodyRaw:    e.bodyRaw ?? null,
-      });
-      if (!isRetryable || attempt === maxAttempts) throw e;
-    }
-  }
-
-  // Step 7 — Create route
+  // Step 7 — Create route with JWT auth
   await apigw.send(new CreateRouteCommand({
     ApiId:             base.apiId,
     RouteKey:          `${httpMethod} ${routePath}`,
     AuthorizationType: 'JWT',
-    AuthorizerId:      authorizer.AuthorizerId,
+    AuthorizerId:      authorizerId,
     Target:            `integrations/${base.integrationId}`,
   }));
   console.log(`${tag()} step 7 done`);
 
-  // Step 8 — Enable AutoDeploy and deploy (routes + authorizer are now in place)
+  // Step 8 — Enable AutoDeploy and deploy
   await enableAutoDeployAndDeploy(base.apiId, tag());
 
   return {
     api_id:        base.apiId,
     api_endpoint:  base.apiEndpoint,
     route_url:     `${base.apiEndpoint}${routePath}`,
-    authorizer_id: authorizer.AuthorizerId,
+    authorizer_id: authorizerId,
     resources: {
-      api_id: base.apiId, authorizer_id: authorizer.AuthorizerId,
+      api_id: base.apiId, authorizer_id: authorizerId,
       log_group: base.logGroupName, cognito_pool_id: poolId, cognito_client_id: clientId,
     },
     test_hint: 'Get an IdToken from Cognito and send as: Authorization: Bearer <IdToken>',
@@ -140,4 +169,3 @@ async function destroy({ api_id, api_name, environment }) {
 }
 
 module.exports = { create, destroy };
-
