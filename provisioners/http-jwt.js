@@ -39,7 +39,7 @@ async function createJwtAuthorizerRaw({ apiId, name, issuer, audience, identityS
 
   const bodyStr = JSON.stringify({
     authorizerType:   'JWT',
-    identitySource,
+    identitySource:   [identitySource],   // must be an ARRAY — botocore/CLI sends array, Node SDK sends string (wrong)
     jwtConfiguration: { audience, issuer },
     name,
   });
