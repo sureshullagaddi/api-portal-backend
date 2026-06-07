@@ -5,7 +5,7 @@ const {
   apigw, lambda, logs,
   getAccountId, buildIntegrationUri,
   deleteHttpApiBase, enableAutoDeployAndDeploy,
-  CreateRouteCommand, CreateAuthorizerCommand,
+  CreateRouteCommand,
   AddPermissionCommand,
 } = require('./base');
 
@@ -18,6 +18,71 @@ const {
 const { CreateLogGroupCommand, PutRetentionPolicyCommand } = require('@aws-sdk/client-cloudwatch-logs');
 
 const REGION = process.env.AWS_ACCOUNT_REGION || process.env.AWS_REGION;
+
+// ── Raw HTTPS CreateAuthorizer — uses Lambda env credentials directly ──────────
+// SDK's CreateAuthorizerCommand returns empty-body 400 for JWT type (SDK bug).
+// AWS CLI works because it reads AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN directly.
+// We do exactly the same here.
+async function createJwtAuthorizerRaw({ apiId, name, issuer, audience, identitySource, logTag }) {
+  const { SignatureV4 } = require('@smithy/signature-v4');
+  const { Hash }        = require('@smithy/hash-node');
+
+  const accessKeyId     = process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const sessionToken    = process.env.AWS_SESSION_TOKEN;
+
+  if (!accessKeyId || !secretAccessKey) throw new Error('AWS credentials not found in Lambda environment');
+  console.log(`${logTag} raw CreateAuthorizer — keyId=${accessKeyId.slice(0, 8)}... sessionToken=${sessionToken ? 'present' : 'MISSING'}`);
+
+  const hostname = `apigateway.${REGION}.amazonaws.com`;
+  const path     = `/v2/apis/${apiId}/authorizers`;
+
+  const bodyStr = JSON.stringify({
+    authorizerType:   'JWT',
+    identitySource,
+    jwtConfiguration: { audience, issuer },
+    name,
+  });
+
+  const signer = new SignatureV4({
+    credentials: { accessKeyId, secretAccessKey, ...(sessionToken ? { sessionToken } : {}) },
+    region:      REGION,
+    service:     'apigateway',
+    sha256:      Hash.bind(null, 'sha256'),
+  });
+
+  const headers = {
+    host:             hostname,
+    'content-type':   'application/json',
+    'content-length': String(Buffer.byteLength(bodyStr)),
+    ...(sessionToken ? { 'x-amz-security-token': sessionToken } : {}),
+  };
+
+  const signed = await signer.sign({ method: 'POST', protocol: 'https:', hostname, path, headers, body: bodyStr });
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({ hostname, path, method: 'POST', headers: signed.headers }, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        console.log(`${logTag} raw CreateAuthorizer → HTTP ${res.statusCode} | body: ${data || '(empty)'}`);
+        if (res.statusCode === 201) {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error(`201 but parse failed: ${data}`)); }
+        } else {
+          let parsed = null;
+          try { parsed = JSON.parse(data); } catch { /* not json */ }
+          reject(Object.assign(new Error(parsed?.message || data || `HTTP ${res.statusCode}`), {
+            name: String(res.statusCode), httpStatus: res.statusCode, bodyRaw: data, bodyJson: parsed,
+          }));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
 
 function validateCognitoIssuer(issuer, poolId, logTag) {
   const discoveryUrl = `${issuer}/.well-known/openid-configuration`;
@@ -55,17 +120,15 @@ async function create({ apiName, environment, routePath, httpMethod, onApiCreate
   if (onApiCreated) await onApiCreated(apiId);
   console.log(`${tag(apiId)} step 1 done — endpoint=${api.ApiEndpoint}`);
 
-  // Step 2 — Create JWT authorizer IMMEDIATELY after API (before integration/stage)
-  // This is the exact order the CLI uses and it works. Integration creation puts
-  // the API into an internal "updating" state that blocks CreateAuthorizer.
-  const authorizer = await apigw.send(new CreateAuthorizerCommand({
-    ApiId:            apiId,
-    Name:             `${apiName}-${environment}-jwt-authorizer`,
-    AuthorizerType:   'JWT',
-    IdentitySource:   '$request.header.Authorization',
-    JwtConfiguration: { Issuer: issuer, Audience: [clientId] },
-  }));
-  console.log(`${tag(apiId)} step 2 done — authorizerId=${authorizer.AuthorizerId}`);
+  // Step 2 — Create JWT authorizer via raw HTTPS (same creds source as CLI)
+  const authorizerResult = await createJwtAuthorizerRaw({
+    apiId, name: `${apiName}-${environment}-jwt-authorizer`,
+    issuer, audience: [clientId],
+    identitySource: '$request.header.Authorization',
+    logTag: tag(apiId),
+  });
+  const authorizerId = authorizerResult.authorizerId;
+  console.log(`${tag(apiId)} step 2 done — authorizerId=${authorizerId}`);
 
   // Step 3 — Integration
   const integrationUri = buildIntegrationUri(process.env.EXISTING_LAMBDA_ARN);
@@ -83,7 +146,7 @@ async function create({ apiName, environment, routePath, httpMethod, onApiCreate
   const logGroupName = `/aws/apigateway/${apiName}-${environment}-api`;
   try { await logs.send(new CreateLogGroupCommand({ logGroupName })); }
   catch (e) { if (e.name !== 'ResourceAlreadyExistsException') throw e; }
-  try { await logs.send(new PutRetentionPolicyCommand({ logGroupName, retentionInDays: 14 })); } catch {}
+  try { await logs.send(new PutRetentionPolicyCommand({ logGroupName, retentionInDays: 14 })); } catch { /* non-fatal */ }
   console.log(`${tag(apiId)} step 5 done — log group`);
 
   // Step 6 — Lambda permission
@@ -102,7 +165,7 @@ async function create({ apiName, environment, routePath, httpMethod, onApiCreate
   // Step 7 — Route (JWT protected)
   await apigw.send(new CreateRouteCommand({
     ApiId: apiId, RouteKey: `${httpMethod} ${routePath}`,
-    AuthorizationType: 'JWT', AuthorizerId: authorizer.AuthorizerId,
+    AuthorizationType: 'JWT', AuthorizerId: authorizerId,
     Target: `integrations/${integration.IntegrationId}`,
   }));
   console.log(`${tag(apiId)} step 7 done — route created`);
@@ -113,8 +176,8 @@ async function create({ apiName, environment, routePath, httpMethod, onApiCreate
   return {
     api_id: apiId, api_endpoint: api.ApiEndpoint,
     route_url: `${api.ApiEndpoint}${routePath}`,
-    authorizer_id: authorizer.AuthorizerId,
-    resources: { api_id: apiId, authorizer_id: authorizer.AuthorizerId, log_group: logGroupName, cognito_pool_id: poolId, cognito_client_id: clientId },
+    authorizer_id: authorizerId,
+    resources: { api_id: apiId, authorizer_id: authorizerId, log_group: logGroupName, cognito_pool_id: poolId, cognito_client_id: clientId },
     test_hint: 'Get an IdToken from Cognito and send as: Authorization: Bearer <IdToken>',
   };
 }
