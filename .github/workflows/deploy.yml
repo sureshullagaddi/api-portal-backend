@@ -51,8 +51,9 @@ jobs:
           role-session-name: api-portal-backend-${{ env.ENVIRONMENT }}
           aws-region:        ${{ env.AWS_REGION }}
 
-      # Install pinned SDK 3.370.0 (avoids Smithy v2 protocol issues with CreateAuthorizer)
-      - name: Install dependencies (SDK 3.370.0 pinned)
+      # SDK 3.600.0 — fixes empty-body 400 error deserialization in CreateAuthorizer
+      # (3.370.0 had de_CreateAuthorizerCommandError bug with empty response bodies)
+      - name: Install dependencies (SDK 3.600.0)
         run: |
           rm -rf node_modules
           npm install --omit=dev --no-audit --no-fund
