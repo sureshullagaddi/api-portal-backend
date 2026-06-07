@@ -49,32 +49,48 @@ const lambda = new LambdaClient({ region: REGION });
 const logs   = new CloudWatchLogsClient({ region: REGION });
 const sts    = new STSClient({ region: REGION });
 
-// ── Raw HTTP error body interceptor ───────────────────────────────────────────
-// Captures the response body the SDK would otherwise swallow, so CloudWatch
-// always shows the real AWS error text (not just "Unknown: UnknownError").
+// ── Raw HTTP response body interceptor ───────────────────────────────────────
+// Runs at the 'deserialize' step with HIGH priority — BEFORE the SDK's own
+// deserializer — so the body stream is read and cached BEFORE the SDK
+// consumes it. Replaces the stream with the cached string so the SDK can
+// still parse it. Attaches the raw body to any thrown error as e.bodyRaw.
 apigw.middlewareStack.add(
   (next, context) => async (args) => {
+    // Pre-read body from the raw HTTP response BEFORE SDK deserializer runs
+    let cachedRawBody = null;
+    try {
+      const body = args.response?.body;
+      if (body) {
+        if (typeof body.transformToString === 'function')      cachedRawBody = await body.transformToString('utf8');
+        else if (typeof body.text === 'function')              cachedRawBody = await body.text();
+        else if (typeof body === 'string')                     cachedRawBody = body;
+        else if (Buffer.isBuffer(body))                        cachedRawBody = body.toString('utf8');
+        // Replace the consumed stream with the cached string so SDK deserializer can still parse it
+        if (cachedRawBody !== null) args.response.body = cachedRawBody;
+      }
+    } catch (preReadErr) {
+      console.warn('[apigw-middleware] pre-read failed:', preReadErr?.message);
+    }
+
     try {
       return await next(args);
     } catch (e) {
-      if (e.$response) {
+      if (cachedRawBody !== null && !e.bodyRaw) {
+        e.bodyRaw = cachedRawBody;
+        // Also attempt to enrich e.message if it's generic
         try {
-          const body = e.$response.body;
-          let rawText = null;
-          if (body && typeof body.transformToString === 'function') rawText = await body.transformToString('utf8');
-          else if (body && typeof body.text === 'function')         rawText = await body.text();
-          else if (typeof body === 'string')                        rawText = body;
-          else if (Buffer.isBuffer(body))                           rawText = body.toString('utf8');
-          console.error(`[apigw-middleware] HTTP ${e.$metadata?.httpStatusCode} body for ${context.commandName}:`, rawText ?? '(empty)');
-          if (rawText && !e.bodyRaw) e.bodyRaw = rawText;
-        } catch (readErr) {
-          console.error('[apigw-middleware] could not read error body:', readErr?.message);
-        }
+          const parsed = JSON.parse(cachedRawBody);
+          const awsMsg = parsed.message || parsed.Message || parsed.errorMessage;
+          if (awsMsg && (e.message === 'UnknownError' || !e.message)) {
+            e.message = awsMsg;
+          }
+        } catch { /* not JSON */ }
       }
+      console.error(`[apigw-middleware] HTTP ${e.$metadata?.httpStatusCode} on ${context.commandName}:`, cachedRawBody ?? '(body not captured)');
       throw e;
     }
   },
-  { step: 'deserialize', name: 'rawErrorLogger', priority: 'low' }
+  { step: 'deserialize', name: 'rawBodyPreReader', priority: 'high' }
 );
 
 let _accountId = null;

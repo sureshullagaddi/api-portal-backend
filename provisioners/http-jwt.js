@@ -71,6 +71,8 @@ async function create({ apiName, environment, routePath, httpMethod, onApiCreate
   );
 
   // Step 6 — Create JWT authorizer (stage AutoDeploy is OFF — no deployment lock)
+  // Retried up to 3 times with backoff — API GW occasionally returns 400 on the
+  // first attempt due to internal propagation delay after CreateApi.
   const authorizerInput = {
     ApiId:            base.apiId,
     Name:             `${apiName}-${environment}-jwt-authorizer`,
@@ -79,21 +81,31 @@ async function create({ apiName, environment, routePath, httpMethod, onApiCreate
     JwtConfiguration: { Issuer: issuer, Audience: safeAudience },
   };
   console.log(`${tag()} step 6 — CreateAuthorizer input:`, JSON.stringify(authorizerInput));
+
   let authorizer;
-  try {
-    authorizer = await apigw.send(new CreateAuthorizerCommand(authorizerInput));
-  } catch (e) {
-    console.error(`${tag()} step 6 FAILED — CreateAuthorizer error:`, {
-      name:       e.name,
-      message:    e.message,
-      httpStatus: e.$metadata?.httpStatusCode,
-      requestId:  e.$metadata?.requestId,
-      bodyRaw:    e.bodyRaw ?? null,
-      input:      JSON.stringify(authorizerInput),
-    });
-    throw e;
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (attempt > 1) {
+        const delay = attempt * 2000;
+        console.log(`${tag()} step 6 — retry attempt ${attempt}/${maxAttempts}, waiting ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+      authorizer = await apigw.send(new CreateAuthorizerCommand(authorizerInput));
+      console.log(`${tag()} step 6 done | authorizerId=${authorizer.AuthorizerId} (attempt ${attempt})`);
+      break;
+    } catch (e) {
+      const isRetryable = e.$metadata?.httpStatusCode === 400 || e.$metadata?.httpStatusCode === 429;
+      console.error(`${tag()} step 6 attempt ${attempt}/${maxAttempts} FAILED:`, {
+        name:       e.name,
+        message:    e.message,
+        httpStatus: e.$metadata?.httpStatusCode,
+        requestId:  e.$metadata?.requestId,
+        bodyRaw:    e.bodyRaw ?? null,
+      });
+      if (!isRetryable || attempt === maxAttempts) throw e;
+    }
   }
-  console.log(`${tag()} step 6 done | authorizerId=${authorizer.AuthorizerId}`);
 
   // Step 7 — Create route
   await apigw.send(new CreateRouteCommand({
