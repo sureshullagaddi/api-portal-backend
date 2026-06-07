@@ -79,7 +79,20 @@ async function create({ apiName, environment, routePath, httpMethod, onApiCreate
     JwtConfiguration: { Issuer: issuer, Audience: safeAudience },
   };
   console.log(`${tag()} step 6 — CreateAuthorizer input:`, JSON.stringify(authorizerInput));
-  const authorizer = await apigw.send(new CreateAuthorizerCommand(authorizerInput));
+  let authorizer;
+  try {
+    authorizer = await apigw.send(new CreateAuthorizerCommand(authorizerInput));
+  } catch (e) {
+    console.error(`${tag()} step 6 FAILED — CreateAuthorizer error:`, {
+      name:       e.name,
+      message:    e.message,
+      httpStatus: e.$metadata?.httpStatusCode,
+      requestId:  e.$metadata?.requestId,
+      bodyRaw:    e.bodyRaw ?? null,
+      input:      JSON.stringify(authorizerInput),
+    });
+    throw e;
+  }
   console.log(`${tag()} step 6 done | authorizerId=${authorizer.AuthorizerId}`);
 
   // Step 7 — Create route

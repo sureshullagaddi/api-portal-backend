@@ -76,13 +76,15 @@ async function serializeAwsError(e) {
   let bodyRaw = null;
   let bodyJson = null;
   try {
-    const rawBody = e.$response?.body;
+    // e.bodyRaw is pre-read by the apigw middleware in base.js (stream already consumed).
+    // Fall back to e.$response?.body only if bodyRaw wasn't captured.
+    const rawBody = e.bodyRaw ?? e.$response?.body;
     if (rawBody) {
-      if (typeof rawBody === 'string')                         bodyRaw = rawBody;
-      else if (Buffer.isBuffer(rawBody))                       bodyRaw = rawBody.toString('utf8');
-      else if (ArrayBuffer.isView(rawBody))                    bodyRaw = Buffer.from(rawBody).toString('utf8');
+      if (typeof rawBody === 'string')                          bodyRaw = rawBody;
+      else if (Buffer.isBuffer(rawBody))                        bodyRaw = rawBody.toString('utf8');
+      else if (ArrayBuffer.isView(rawBody))                     bodyRaw = Buffer.from(rawBody).toString('utf8');
       else if (typeof rawBody.transformToString === 'function') bodyRaw = await rawBody.transformToString('utf8');
-      else if (typeof rawBody.text === 'function')             bodyRaw = await rawBody.text();
+      else if (typeof rawBody.text === 'function')              bodyRaw = await rawBody.text();
 
       if (bodyRaw) {
         try { bodyJson = JSON.parse(bodyRaw); } catch { /* not JSON */ }
